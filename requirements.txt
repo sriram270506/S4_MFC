@@ -1,0 +1,49 @@
+# =====================================================
+# requirements.txt — Real-Time Speaker Diarization
+# =====================================================
+# Install with: pip install -r requirements.txt
+#
+# Note: torch may need to be installed separately
+# depending on your CUDA version.
+# CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# --- Web Framework ---
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+
+# --- Core ML ---
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy>=1.24.0
+
+# --- ASR ---
+faster-whisper>=0.10.0
+# whisperx is optional (for better word alignment)
+# whisperx>=3.1.1
+
+# --- VAD ---
+# silero-vad is loaded via torch.hub — no pip package needed
+# But we need:
+omegaconf>=2.3.0
+
+# --- Speaker Embedding ---
+speechbrain>=0.5.16
+huggingface-hub>=0.19.0
+
+# --- Clustering / ML ---
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# --- Audio I/O ---
+soundfile>=0.12.1
+librosa>=0.10.1
+
+# --- Utilities ---
+python-multipart>=0.0.6
+aiofiles>=23.2.0
+pydantic>=2.0.0
+
+# --- Optional: pyannote for advanced diarization ---
+# pyannote.audio>=3.0.0
+# (requires HuggingFace token and license agreement)

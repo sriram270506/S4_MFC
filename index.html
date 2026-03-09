@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LiveTranscribe — Real-Time Speaker Diarization</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────── -->
+  <header class="app-header">
+    <div class="header-logo">
+      <div class="logo-icon">
+        <span class="waveform-icon">
+          <span></span><span></span><span></span><span></span><span></span>
+        </span>
+      </div>
+      <div class="header-text">
+        <h1>LiveTranscribe <span class="v2-badge">v2</span></h1>
+        <p>Neural Speaker Diarization — Fixed Embeddings</p>
+      </div>
+    </div>
+    <div class="header-status">
+      <div id="connectionBadge" class="badge badge--disconnected">
+        <span class="badge-dot"></span>
+        <span class="badge-text">Disconnected</span>
+      </div>
+      <div id="vadIndicator" class="vad-indicator" title="Voice Activity Detection">
+        <span class="vad-label">VAD</span>
+        <span id="vadDot" class="vad-dot vad-dot--silent"></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main Layout ─────────────────────────────── -->
+  <main class="app-main">
+
+    <!-- Left: Controls + Stats -->
+    <aside class="sidebar">
+
+      <!-- Mic Controls -->
+      <section class="panel panel--controls">
+        <h2 class="panel-title">Controls</h2>
+        <div class="controls-stack">
+          <button id="startBtn" class="btn btn--primary" onclick="startRecording()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 15c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 15 6.7 12H5c0 3.42 2.72 6.23 6 6.72V21h2v-2.28c3.28-.49 6-3.3 6-6.72h-1.7z"/>
+            </svg>
+            Start Recording
+          </button>
+          <button id="stopBtn" class="btn btn--danger" onclick="stopRecording()" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 6h12v12H6z"/>
+            </svg>
+            Stop
+          </button>
+          <button id="clearBtn" class="btn btn--ghost" onclick="clearTranscript()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            </svg>
+            Clear
+          </button>
+        </div>
+
+        <!-- Audio level meter -->
+        <div class="meter-row">
+          <span class="meter-label">Level</span>
+          <div class="meter-track">
+            <div id="levelBar" class="meter-bar"></div>
+          </div>
+          <span id="levelVal" class="meter-val">—</span>
+        </div>
+      </section>
+
+      <!-- Session Statistics -->
+      <section class="panel panel--stats">
+        <h2 class="panel-title">Session</h2>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-value" id="statDuration">00:00</span>
+            <span class="stat-label">Duration</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="statChunks">0</span>
+            <span class="stat-label">Chunks</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="statSpeakers">0</span>
+            <span class="stat-label">Speakers</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="statLines">0</span>
+            <span class="stat-label">Lines</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Speaker Registry -->
+      <section class="panel panel--speakers">
+        <h2 class="panel-title">Speakers</h2>
+        <div id="speakerList" class="speaker-list">
+          <p class="empty-hint">Detected speakers will appear here</p>
+        </div>
+      </section>
+
+      <!-- Config -->
+      <section class="panel panel--config">
+        <h2 class="panel-title">Config</h2>
+        <label class="config-row">
+          <span>Chunk (ms)</span>
+          <input id="chunkMs" type="number" value="1500" min="500" max="3000" step="100" class="config-input"/>
+        </label>
+        <label class="config-row">
+          <span>Sample Rate</span>
+          <select id="sampleRate" class="config-input">
+            <option value="16000" selected>16 kHz</option>
+            <option value="22050">22 kHz</option>
+          </select>
+        </label>
+        <label class="config-row">
+          <span>WS Host</span>
+          <input id="wsHost" type="text" value="localhost:8000" class="config-input"/>
+        </label>
+      </section>
+
+      <!-- Diagnostics (collapsible) -->
+      <section class="panel panel--diagnostics">
+        <h2 class="panel-title panel-title--collapsible" onclick="toggleDiagnostics()">
+          Diagnostics <span id="diagChevron" style="float:right;font-size:0.8em">▼</span>
+        </h2>
+        <div id="diagContent">
+          <div class="stats-grid">
+            <div class="stat-item">
+              <span class="stat-value" id="diagAvgConf">—</span>
+              <span class="stat-label">Avg conf</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value" id="diagTotalChunks">0</span>
+              <span class="stat-label">Chunks</span>
+            </div>
+            <div class="stat-item" style="grid-column:span 2">
+              <span class="stat-value" id="diagSpeechRatio">—</span>
+              <span class="stat-label">Speech ratio</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- Right: Transcript Panel -->
+    <section class="transcript-panel">
+      <div class="transcript-header">
+        <span class="transcript-title">Live Transcript</span>
+        <div class="transcript-actions">
+          <button class="icon-btn" onclick="exportTranscript()" title="Export transcript">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 12v7H5v-7H3v7c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2zm-6 .67l2.59-2.58L17 11.5l-5 5-5-5 1.41-1.41L11 12.67V3h2z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Transcript stream -->
+      <div id="transcriptFeed" class="transcript-feed">
+        <div class="welcome-message">
+          <div class="welcome-icon">🎙️</div>
+          <p>Press <strong>Start Recording</strong> to begin transcription.</p>
+          <p class="sub">Speak clearly into your microphone. Multiple speakers are automatically identified.</p>
+        </div>
+      </div>
+
+      <!-- Partial / live indicator -->
+      <div id="partialLine" class="partial-line" style="display:none">
+        <span class="partial-speaker" id="partialSpeaker"></span>
+        <span class="partial-text" id="partialText"></span>
+        <span class="cursor-blink">▋</span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast" style="display:none"></div>
+
+  <script src="script.js"></script>
+</body>
+</html>
