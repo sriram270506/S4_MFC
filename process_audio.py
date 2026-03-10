@@ -320,7 +320,7 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
 
 def process_file(
     filepath:       str,
-    model_size:     str   = "base",
+    model_size:     str | None = None,
     chunk_sec:      float = 1.5,
     max_speakers:   int   = 8,
     known_speakers: int   = 0
@@ -368,8 +368,23 @@ def process_file(
 
     vad      = CombinedVAD(sample_rate=sr);      vad.initialize()
     embedder = SpeakerEmbeddingExtractor(sample_rate=sr); embedder.load()
-    asr      = WhisperASR(model_size=model_size, device="cpu",
-                          compute_type="int8", language="en"); asr.load()
+
+    runtime_probe = SpeechPipeline.__new__(SpeechPipeline)
+    auto_model_size, _auto_fallback, asr_device, asr_compute_type, _fallback_compute_type = (
+        runtime_probe._resolve_asr_runtime()
+    )
+    selected_model_size = model_size or auto_model_size
+
+    print(
+        f"  ASR runtime: model={selected_model_size} device={asr_device} "
+        f"compute_type={asr_compute_type}"
+    )
+    asr = WhisperASR(
+        model_size=selected_model_size,
+        device=asr_device,
+        compute_type=asr_compute_type,
+        language="en",
+    ); asr.load()
     print(f"  {ANSI_GREEN}Models loaded.{ANSI_RESET}\n")
 
     # ── PASS 1: VAD + Embedding for every chunk ───────────
@@ -867,10 +882,10 @@ Examples:
     # Options
     parser.add_argument(
         "--model",
-        choices=["tiny", "base", "small", "medium", "large"],
-        default="base",
-        help="Whisper model size (default: base). "
-             "tiny=fastest, small=better accuracy, large=best (needs GPU)"
+           choices=["auto", "tiny", "base", "small", "medium", "large", "large-v3"],
+           default="auto",
+           help="Whisper model size (default: auto). "
+               "auto picks medium on 6GB CUDA, small on CPU."
     )
     parser.add_argument(
         "--chunk",
@@ -922,14 +937,14 @@ def main():
     if args.file:
         process_file(
             filepath=args.file,
-            model_size=args.model,
+            model_size=None if args.model == "auto" else args.model,
             chunk_sec=args.chunk,
             max_speakers=args.speakers if args.speakers > 0 else 8,
             known_speakers=args.speakers
         )
     elif args.mic:
         process_mic(
-            model_size=args.model,
+            model_size="medium" if args.model == "auto" else args.model,
             chunk_sec=args.chunk,
             sample_rate=args.sr,
             max_speakers=args.speakers

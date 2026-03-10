@@ -44,11 +44,17 @@ class AudioStreamHandler:
         self,
         sample_rate: int = 16000,
         chunk_seconds: float = 1.5,
-        overlap_ratio: float = 0.2
+        overlap_ratio: float = 0.2,
+        enable_slow_agc: bool = True,
+        agc_target_rms: float = 0.07,
+        agc_smoothing: float = 0.05
     ):
         self.sample_rate = sample_rate
         self.chunk_seconds = chunk_seconds
         self.overlap_ratio = overlap_ratio
+        self.enable_slow_agc = enable_slow_agc
+        self.agc_target_rms = agc_target_rms
+        self.agc_smoothing = agc_smoothing
 
         # How many samples per chunk
         self.chunk_size = int(sample_rate * chunk_seconds)
@@ -63,11 +69,17 @@ class AudioStreamHandler:
         # Keep last N samples from previous chunk for overlap
         self._prev_tail: Optional[np.ndarray] = None
 
+        # Session-level slow AGC state.
+        # We intentionally avoid per-burst peak normalization because it
+        # distorts speaker identity cues between adjacent packets.
+        self._agc_gain: float = 1.0
+
         logger.info(
             f"AudioStreamHandler init: "
             f"sample_rate={sample_rate}, "
             f"chunk_size={self.chunk_size} samples ({chunk_seconds}s), "
-            f"overlap={self.overlap_size} samples"
+            f"overlap={self.overlap_size} samples, "
+            f"slow_agc={self.enable_slow_agc}"
         )
 
     # ──────────────────────────────────────────────────────────
@@ -131,6 +143,20 @@ class AudioStreamHandler:
         self._buffer.clear()
         self._buffer_len = 0
         self._prev_tail = None
+        self._agc_gain = 1.0
+
+    def set_chunk_seconds(self, chunk_seconds: float):
+        """Adjust chunk duration at runtime for adaptive backpressure control."""
+        chunk_seconds = float(max(0.5, min(3.0, chunk_seconds)))
+        self.chunk_seconds = chunk_seconds
+        self.chunk_size = int(self.sample_rate * self.chunk_seconds)
+        self.overlap_size = int(self.chunk_size * self.overlap_ratio)
+        logger.info(
+            "AudioStreamHandler chunk resized: %.2fs (%d samples), overlap=%d",
+            self.chunk_seconds,
+            self.chunk_size,
+            self.overlap_size,
+        )
 
     # ──────────────────────────────────────────────────────────
     # Internal Methods (implemented from scratch)
@@ -176,7 +202,7 @@ class AudioStreamHandler:
             self._buffer.append(leftover)
         self._buffer_len = len(leftover)
 
-        return chunk_with_context
+        return self._apply_slow_agc(chunk_with_context)
 
     def _preprocess(self, audio: np.ndarray) -> np.ndarray:
         """
@@ -185,7 +211,7 @@ class AudioStreamHandler:
         Steps (all implemented from scratch):
           1. Ensure float32 dtype
           2. Clip hard peaks (avoid NaN/Inf from bad mic input)
-          3. Normalize amplitude
+          3. Keep original loudness envelope (identity-safe)
 
         NOTE: Pre-emphasis (high-pass filter) is intentionally NOT applied here.
           Pre-emphasis is applied per-burst (every ~250ms browser packet), which
@@ -204,10 +230,32 @@ class AudioStreamHandler:
         # Step 2: Clip extreme values (corrupted mic data)
         audio = np.clip(audio, -1.0, 1.0)
 
-        # Step 3: Normalize amplitude to [-1, 1] range
-        audio = self._normalize(audio)
+        # Step 3: Do NOT normalize per incoming packet.
+        # Per-packet normalization causes speaker embedding drift.
 
         return audio
+
+    def _apply_slow_agc(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Apply slow, session-level AGC to stabilize loudness without
+        creating packet-to-packet identity distortion.
+        """
+        if not self.enable_slow_agc or len(audio) == 0:
+            return audio
+
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 1e-5:
+            return audio
+
+        desired_gain = self.agc_target_rms / rms
+        desired_gain = float(np.clip(desired_gain, 0.25, 4.0))
+
+        # Exponential smoothing keeps gain changes gradual across chunks.
+        self._agc_gain = (
+            (1.0 - self.agc_smoothing) * self._agc_gain
+            + self.agc_smoothing * desired_gain
+        )
+        return np.clip(audio * self._agc_gain, -1.0, 1.0).astype(np.float32)
 
     def _pre_emphasis(self, audio: np.ndarray, alpha: float = 0.97) -> np.ndarray:
         """
@@ -283,7 +331,9 @@ class AudioStreamHandler:
             "buffer_samples": self._buffer_len,
             "buffer_seconds": round(self.buffer_seconds, 3),
             "chunk_size": self.chunk_size,
+            "chunk_seconds": round(self.chunk_seconds, 3),
             "sample_rate": self.sample_rate,
+            "agc_gain": round(self._agc_gain, 4),
         }
 
 

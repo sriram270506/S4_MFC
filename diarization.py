@@ -54,6 +54,76 @@ import time as _time
 logger = logging.getLogger("diarization")
 
 
+def _ensure_torchaudio_backend_compat():
+    """
+    Patch torchaudio 2.10+ so SpeechBrain's legacy backend probe still imports.
+
+    SpeechBrain 1.0.x calls torchaudio.list_audio_backends() during import,
+    but torchaudio removed the global backend API. We provide minimal no-op
+    shims so SpeechBrain can continue using torchaudio's dispatcher-based I/O.
+    """
+    try:
+        import platform
+        import torchaudio
+    except Exception:
+        return
+
+    if not hasattr(torchaudio, "list_audio_backends"):
+        fallback_backend = "soundfile" if platform.system() == "Windows" else "ffmpeg"
+        torchaudio.list_audio_backends = lambda: [fallback_backend]
+
+    if not hasattr(torchaudio, "set_audio_backend"):
+        torchaudio.set_audio_backend = lambda backend: None
+
+    if not hasattr(torchaudio, "get_audio_backend"):
+        torchaudio.get_audio_backend = lambda: None
+
+
+def _ensure_huggingface_hub_compat():
+    """
+    Patch huggingface_hub 1.x so SpeechBrain's older fetch helper still works.
+
+    SpeechBrain 1.0.x passes legacy hf_hub_download kwargs that were renamed or
+    removed in newer huggingface_hub releases.
+    """
+    try:
+        import inspect
+        import huggingface_hub
+    except Exception:
+        return
+
+    hf_hub_download = getattr(huggingface_hub, "hf_hub_download", None)
+    if hf_hub_download is None:
+        return
+
+    if getattr(hf_hub_download, "_s4_mfc_compat", False):
+        return
+
+    supported_params = inspect.signature(hf_hub_download).parameters
+
+    def compat_hf_hub_download(*args, **kwargs):
+        if "use_auth_token" in kwargs and "use_auth_token" not in supported_params:
+            kwargs["token"] = kwargs.pop("use_auth_token")
+
+        if "local_dir_use_symlinks" in kwargs and "local_dir_use_symlinks" not in supported_params:
+            kwargs.pop("local_dir_use_symlinks")
+
+        if "force_filename" in kwargs and "force_filename" not in supported_params:
+            kwargs.pop("force_filename")
+
+        try:
+            return hf_hub_download(*args, **kwargs)
+        except Exception as exc:
+            remote_not_found = getattr(huggingface_hub, "errors", None)
+            remote_not_found = getattr(remote_not_found, "RemoteEntryNotFoundError", None)
+            if remote_not_found is not None and isinstance(exc, remote_not_found):
+                raise ValueError("File not found on HF hub") from exc
+            raise
+
+    compat_hf_hub_download._s4_mfc_compat = True
+    huggingface_hub.hf_hub_download = compat_hf_hub_download
+
+
 # ──────────────────────────────────────────────────────────────
 # Data Structures
 # ──────────────────────────────────────────────────────────────
@@ -451,12 +521,16 @@ class SpeakerEmbeddingExtractor:
         import traceback as _tb
 
         logger.info("Loading SpeechBrain ECAPA-TDNN model...")
+        _ensure_torchaudio_backend_compat()
+        _ensure_huggingface_hub_compat()
 
         EncoderClassifier = None
+        LocalStrategy = None
 
         # Try new API path (speechbrain >= 1.0 / 0.5.15+)
         try:
             from speechbrain.inference.classifiers import EncoderClassifier
+            from speechbrain.utils.fetching import LocalStrategy
             logger.info("SpeechBrain: using new API (inference.classifiers)")
         except ImportError:
             pass
@@ -475,10 +549,16 @@ class SpeakerEmbeddingExtractor:
                 return
 
         try:
+            from_hparams_kwargs = {
+                "source": "speechbrain/spkrec-ecapa-voxceleb",
+                "savedir": "models/speechbrain_ecapa",
+                "run_opts": {"device": "cpu"},
+            }
+            if LocalStrategy is not None:
+                from_hparams_kwargs["local_strategy"] = LocalStrategy.COPY
+
             self.classifier = EncoderClassifier.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir="models/speechbrain_ecapa",
-                run_opts={"device": "cpu"}
+                **from_hparams_kwargs
             )
             self._loaded = True
             logger.info(

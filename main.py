@@ -114,15 +114,22 @@ async def websocket_audio(websocket: WebSocket):
     client_id = id(websocket)
     logger.info(f"Client connected: {client_id}")
 
-    # Each WebSocket connection gets its own stream handler
-    # Reuse the global pipeline (models already loaded at startup) but reset its state
-    stream_handler = AudioStreamHandler(sample_rate=16000, chunk_seconds=2.0)
+    base_chunk_seconds = 1.5
+    max_chunk_seconds = 2.5
+    current_chunk_seconds = base_chunk_seconds
+    queue_max = 8
+    dropped_chunks = 0
 
-    # Reset cluster/subtitle state for this new session (models stay loaded)
+    # Each WebSocket connection gets its own stream handler.
+    stream_handler = AudioStreamHandler(sample_rate=16000, chunk_seconds=base_chunk_seconds)
+
+    # Reset cluster/subtitle state for this new session (models stay loaded).
     pipeline.reset()
-
     session_start_time = time.time()
-    processing = False  # Guard: True while a chunk is being processed
+    chunk_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_max)
+
+    async def send_result(result: dict):
+        await websocket.send_text(json.dumps(result))
 
     async def send_ping():
         """Send periodic pings to keep WebSocket alive during long processing."""
@@ -133,44 +140,85 @@ async def websocket_audio(websocket: WebSocket):
         except Exception:
             pass
 
+    async def queue_worker():
+        """Stage worker: dequeue chunk -> pipeline -> websocket send."""
+        nonlocal dropped_chunks
+        while True:
+            item = await chunk_queue.get()
+            if item is None:
+                chunk_queue.task_done()
+                break
+
+            try:
+                meta = {
+                    "queue_depth": chunk_queue.qsize(),
+                    "queue_max": queue_max,
+                    "dropped_chunks": dropped_chunks,
+                    "chunk_seconds": current_chunk_seconds,
+                }
+                results = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    pipeline.process_chunk,
+                    item["chunk"],
+                    item["timestamp"],
+                    meta,
+                )
+                for result in results:
+                    await send_result(result)
+            except Exception as e:
+                logger.debug(f"Queue worker processing warning: {e}")
+            finally:
+                chunk_queue.task_done()
+
+    async def enqueue_chunk(chunk: np.ndarray, timestamp: str):
+        """Queue stage input with bounded-queue adaptive handling."""
+        nonlocal current_chunk_seconds, dropped_chunks
+        pressure = chunk_queue.qsize() / queue_max
+
+        # Adapt chunk duration before dropping anything.
+        if pressure >= 0.75 and current_chunk_seconds < max_chunk_seconds:
+            current_chunk_seconds = min(max_chunk_seconds, current_chunk_seconds + 0.25)
+            stream_handler.set_chunk_seconds(current_chunk_seconds)
+            logger.info(
+                "Queue pressure high (%.2f). Increased chunk size to %.2fs",
+                pressure,
+                current_chunk_seconds,
+            )
+        elif pressure <= 0.25 and current_chunk_seconds > base_chunk_seconds:
+            current_chunk_seconds = max(base_chunk_seconds, current_chunk_seconds - 0.25)
+            stream_handler.set_chunk_seconds(current_chunk_seconds)
+
+        # Bounded queue: drop oldest only as a last resort.
+        if chunk_queue.full():
+            try:
+                _ = chunk_queue.get_nowait()
+                chunk_queue.task_done()
+                dropped_chunks += 1
+                logger.warning(
+                    "Queue full. Dropped oldest queued chunk (total dropped=%d)",
+                    dropped_chunks,
+                )
+            except asyncio.QueueEmpty:
+                pass
+
+        await chunk_queue.put({"chunk": chunk, "timestamp": timestamp})
+
     ping_task = asyncio.create_task(send_ping())
+    worker_task = asyncio.create_task(queue_worker())
 
     try:
         while True:
-            # Receive raw bytes from browser
             raw_bytes = await websocket.receive_bytes()
-
-            # Convert bytes → numpy float32 array
             audio_chunk = np.frombuffer(raw_bytes, dtype=np.float32).copy()
-
-            # Feed into stream handler (accumulates audio into fixed-size chunks)
             complete_chunks = stream_handler.add_audio(audio_chunk)
 
             if not complete_chunks:
                 continue
 
-            # If processing is slow, only process the LATEST chunk (drop stale ones)
-            # This prevents the server from falling behind real-time
-            if len(complete_chunks) > 1:
-                logger.info(f"Dropping {len(complete_chunks) - 1} stale chunk(s) to stay real-time")
-            chunk = complete_chunks[-1]  # Only process the freshest chunk
-
-            # Calculate timestamp relative to session start
-            elapsed = time.time() - session_start_time
-            timestamp = format_timestamp(elapsed)
-
-            # Run the full pipeline on this chunk
-            results = await asyncio.get_event_loop().run_in_executor(
-                None,  # uses default ThreadPoolExecutor
-                pipeline.process_chunk,
-                chunk,
-                timestamp
-            )
-
-            # Send each subtitle result back to frontend
-            for result in results:
-                await websocket.send_text(json.dumps(result))
-                logger.info(f"Sent: [{result['timestamp']}] {result['speaker']}: {result['text']}")
+            for chunk in complete_chunks:
+                elapsed = time.time() - session_start_time
+                timestamp = format_timestamp(elapsed)
+                await enqueue_chunk(chunk, timestamp)
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected: {client_id}")
@@ -183,10 +231,34 @@ async def websocket_audio(websocket: WebSocket):
                 "speaker": "System",
                 "text": f"Processing error: {str(e)}"
             }))
-        except:
+        except Exception:
             pass
     finally:
+        # Flush remaining buffered audio into queue.
+        try:
+            leftover = stream_handler.flush()
+            if leftover is not None:
+                elapsed = time.time() - session_start_time
+                await enqueue_chunk(leftover, format_timestamp(elapsed))
+        except Exception as e:
+            logger.debug(f"Stream flush skipped: {e}")
+
+        try:
+            await chunk_queue.join()
+            await chunk_queue.put(None)
+            await worker_task
+        except Exception as e:
+            logger.debug(f"Queue shutdown warning: {e}")
+
+        # Explicit subtitle flush on stop/disconnect.
+        try:
+            for result in pipeline.process_flush():
+                await send_result(result)
+        except Exception as e:
+            logger.debug(f"Pipeline flush warning: {e}")
+
         ping_task.cancel()
+        worker_task.cancel()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -206,7 +278,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=8000,
         reload=False,
         log_level="info"

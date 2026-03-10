@@ -117,23 +117,22 @@ class OnlineSpeakerClusterer:
 
     def __init__(
         self,
-        similarity_threshold: float = 0.45,
-        # WHY 0.45: After fixing diarization preprocessing (fixed-length 3-second
-        # chunks without voiced-frame extraction), ECAPA-TDNN same-speaker
-        # similarities stabilise to 0.45–0.75.  This threshold sits safely below
-        # that range while staying well above cross-speaker scores (0.0–0.35).
+        similarity_threshold: float = 0.40,
+        # WHY 0.40: In live 1.5-second chunks with overlap, same-speaker scores on
+        # laptop microphones often land around 0.40–0.60 while true speaker changes
+        # drop into the 0.20–0.35 range.  0.45 was too conservative and caused
+        # persistent under-segmentation.
         max_speakers: int = 8,
         min_samples_to_keep: int = 2,
         merge_threshold: float = 0.75,
         # WHY 0.75: Only merge clusters that are virtually identical (an accidentally
         # split single speaker).  Two real speakers never score this high.
         max_inactive_seconds: float = 300.0,
-        new_speaker_patience: int = 10
-        # WHY 10: 10 consecutive below-threshold chunks = ≈20 seconds of sustained
-        # below-threshold evidence before declaring a new speaker.
-        # This makes the system very resistant to false positives from one-off
-        # noisy chunks.  Production systems (Zoom, YouTube live) use comparable
-        # hold-off windows.
+        new_speaker_patience: int = 4
+        # WHY 4: 4 consecutive below-threshold chunks = ≈6 seconds of sustained
+        # mismatch at the default 1.5-second chunk size.  This is still resistant
+        # to one-off noisy misses but responds fast enough to real speaker turns in
+        # live conversation.
     ):
         self.similarity_threshold = similarity_threshold
         self.max_speakers = max_speakers

@@ -137,7 +137,8 @@ class WhisperASR:
     def transcribe(
         self,
         audio: np.ndarray,
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        profile: str = "quality"
     ) -> Optional[TranscriptionResult]:
         """
         Transcribe audio chunk to text.
@@ -164,7 +165,7 @@ class WhisperASR:
             return self._demo_transcription(audio)
 
         try:
-            result = self._run_whisper(audio, sample_rate)
+            result = self._run_whisper(audio, sample_rate, profile=profile)
             proc_ms = (time.time() - start_time) * 1000
 
             if result:
@@ -225,9 +226,14 @@ class WhisperASR:
     def _run_whisper(
         self,
         audio: np.ndarray,
-        sample_rate: int
+        sample_rate: int,
+        profile: str = "quality"
     ) -> Optional[TranscriptionResult]:
         """Run faster-whisper inference and return structured result."""
+
+        use_fast_profile = profile == "fast"
+        beam_size = 1 if use_fast_profile else self.beam_size
+        word_timestamps = not use_fast_profile
 
         # Apply pre-emphasis here (and ONLY here) — FROM SCRATCH.
         # Formula: y[n] = x[n] - 0.97 * x[n-1]
@@ -241,8 +247,8 @@ class WhisperASR:
         segments, info = self.model.transcribe(
             audio_for_asr,
             language=self.language,
-            beam_size=self.beam_size,
-            word_timestamps=True,
+            beam_size=beam_size,
+            word_timestamps=word_timestamps,
             # ── ANTI-HALLUCINATION SETTINGS ─────────────────────────────────
             # temperature=0.0 forces greedy decoding.  Temperatures > 0 make
             # Whisper sample tokens randomly; on short/noisy audio this
@@ -260,7 +266,7 @@ class WhisperASR:
             # through Energy/Silero VAD.
             vad_filter=True,
             vad_parameters=dict(
-                min_silence_duration_ms=400,
+                min_silence_duration_ms=250 if use_fast_profile else 400,
                 threshold=0.35,
             ),
             # ── QUALITY GATES ───────────────────────────────────────────────
@@ -302,6 +308,15 @@ class WhisperASR:
                 all_probs.append(0.8)
 
         if not all_text_parts:
+            logger.info(
+                "ASR: no speech detected "
+                "(lang=%s lang_prob=%.2f no_speech_prob=%.2f) — "
+                "speak clearly into the mic",
+                getattr(info, "language", "?"),
+                getattr(info, "language_probability", 0.0),
+                getattr(info, "no_speech_prob", 0.0) if hasattr(info, "no_speech_prob")
+                else 0.0,
+            )
             return None
 
         # Compute average confidence
@@ -313,11 +328,12 @@ class WhisperASR:
         full_text = self._clean_text(full_text)
 
         if not full_text:
+            logger.info("ASR: whisper output was cleaned to empty (hallucination blocked)")
             return None
 
         # Filter low-confidence results
         if avg_confidence < self.min_confidence:
-            logger.debug(f"Low confidence transcription ({avg_confidence:.2f}), skipping.")
+            logger.info(f"ASR: low confidence ({avg_confidence:.2f} < {self.min_confidence}), skipping.")
             return None
 
         # NOTE: We intentionally do NOT maintain a rolling context prompt.

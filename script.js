@@ -53,6 +53,7 @@ const speakerRegistry = {};
 
 // Subtitle history for export
 const subtitleHistory = [];
+const segmentLineMap = new Map();
 
 // ── DOM Refs ──────────────────────────────────────────────
 const startBtn       = () => document.getElementById('startBtn');
@@ -152,9 +153,9 @@ async function startRecording() {
       audio: {
         channelCount: 1,          // Mono
         sampleRate: { ideal: DEFAULT_SAMPLE_RATE },
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+        echoCancellation: document.getElementById('browserDsp').value === 'on',
+        noiseSuppression: document.getElementById('browserDsp').value === 'on',
+        autoGainControl: document.getElementById('browserDsp').value === 'on'
       }
     });
 
@@ -179,9 +180,13 @@ async function startRecording() {
 
     scriptProcessor.onaudioprocess = onAudioProcess;
 
-    // Connect: source → processor → destination (for processing)
+    // Connect: source -> processor -> destination.
+    // Keep output path silent to avoid acoustic feedback loops.
     source.connect(scriptProcessor);
-    scriptProcessor.connect(audioContext.destination);
+    const silentGain = audioContext.createGain();
+    silentGain.gain.value = 0.0;
+    scriptProcessor.connect(silentGain);
+    silentGain.connect(audioContext.destination);
 
     // Step 5: Initialize state
     isRecording  = true;
@@ -379,6 +384,16 @@ function sendAudioChunk(float32Array) {
  * }
  */
 function handleBackendMessage(data) {
+  if (data.type === 'metrics') {
+    updateDiagnostics(data);
+    return;
+  }
+
+  if (data.type === 'revision') {
+    applyRevision(data);
+    return;
+  }
+
   // Error handling
   if (data.error) {
     console.error('[Backend] Error:', data.error);
@@ -440,6 +455,10 @@ function addSubtitleLine(data) {
 
   const line = document.createElement('div');
   line.className = `subtitle-line s-${data.speaker_id % 8}`;
+  if (data.segment_id !== undefined && data.segment_id !== null) {
+    line.dataset.segmentId = String(data.segment_id);
+    segmentLineMap.set(String(data.segment_id), line);
+  }
   if (data.is_partial) line.classList.add('partial');
 
   // Format confidence percentage
@@ -471,6 +490,53 @@ function addSubtitleLine(data) {
 
   // Auto-scroll to bottom
   feed.scrollTop = feed.scrollHeight;
+}
+
+function applyRevision(data) {
+  const segmentId = String(data.segment_id ?? '');
+  if (!segmentId) return;
+
+  const line = segmentLineMap.get(segmentId)
+    || transcriptFeed().querySelector(`[data-segment-id="${segmentId}"]`);
+  if (!line) return;
+
+  const speakerElem = line.querySelector('.subtitle-speaker');
+  if (speakerElem && data.new_speaker) speakerElem.textContent = data.new_speaker;
+
+  if (typeof data.new_speaker_id === 'number') {
+    line.className = `subtitle-line s-${data.new_speaker_id % 8}`;
+  }
+
+  if (data.color) {
+    line.style.borderLeftColor = data.color;
+    if (speakerElem) speakerElem.style.color = data.color;
+  }
+
+  line.classList.add('revised');
+}
+
+function updateDiagnostics(metrics) {
+  const queueEl = document.getElementById('diagQueueDepth');
+  const droppedEl = document.getElementById('diagDropped');
+  const asrModeEl = document.getElementById('diagAsrMode');
+  const latencyEl = document.getElementById('diagLatency');
+  const driftEl = document.getElementById('diagEmbDrift');
+
+  if (queueEl) queueEl.textContent = `${metrics.queue_depth}/${metrics.queue_max}`;
+  if (droppedEl) droppedEl.textContent = String(metrics.dropped_chunks ?? 0);
+  if (asrModeEl) asrModeEl.textContent = metrics.asr_mode || '—';
+  if (latencyEl && metrics.stage_latency_ms) {
+    latencyEl.textContent = `${Math.round(metrics.stage_latency_ms.total || 0)}ms`;
+  }
+  if (driftEl) {
+    if (metrics.embedding_drift == null) {
+      driftEl.textContent = '—';
+    } else if (metrics.boundary_score == null) {
+      driftEl.textContent = String(metrics.embedding_drift);
+    } else {
+      driftEl.textContent = `${metrics.embedding_drift} / b:${metrics.boundary_score}`;
+    }
+  }
 }
 
 function updatePartialLine(data) {
@@ -632,11 +698,22 @@ function clearTranscript() {
   recentConfidences.length = 0;
   Object.keys(speakerRegistry).forEach(k => delete speakerRegistry[k]);
   subtitleHistory.length = 0;
+  segmentLineMap.clear();
 
   document.getElementById('statLines').textContent = 0;
   document.getElementById('statSpeakers').textContent = 0;
   document.getElementById('diagAvgConf').textContent = '—';
   document.getElementById('diagSpeechRatio').textContent = '—';
+  const diagQueue = document.getElementById('diagQueueDepth');
+  const diagDropped = document.getElementById('diagDropped');
+  const diagAsrMode = document.getElementById('diagAsrMode');
+  const diagLatency = document.getElementById('diagLatency');
+  const diagDrift = document.getElementById('diagEmbDrift');
+  if (diagQueue) diagQueue.textContent = '0/0';
+  if (diagDropped) diagDropped.textContent = '0';
+  if (diagAsrMode) diagAsrMode.textContent = '—';
+  if (diagLatency) diagLatency.textContent = '—';
+  if (diagDrift) diagDrift.textContent = '—';
   renderSpeakerList();
 }
 

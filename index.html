@@ -124,6 +124,13 @@
           <span>WS Host</span>
           <input id="wsHost" type="text" value="localhost:8000" class="config-input"/>
         </label>
+        <label class="config-row">
+          <span>Browser DSP</span>
+          <select id="browserDsp" class="config-input">
+            <option value="off" selected>Off (identity-safe)</option>
+            <option value="on">On (cleaner, less identity)</option>
+          </select>
+        </label>
       </section>
 
       <!-- Diagnostics (collapsible) -->
@@ -144,6 +151,26 @@
             <div class="stat-item" style="grid-column:span 2">
               <span class="stat-value" id="diagSpeechRatio">—</span>
               <span class="stat-label">Speech ratio</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value" id="diagQueueDepth">0/0</span>
+              <span class="stat-label">Queue</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value" id="diagDropped">0</span>
+              <span class="stat-label">Dropped</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value" id="diagAsrMode">—</span>
+              <span class="stat-label">ASR mode</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-value" id="diagLatency">—</span>
+              <span class="stat-label">Latency</span>
+            </div>
+            <div class="stat-item" style="grid-column:span 2">
+              <span class="stat-value" id="diagEmbDrift">—</span>
+              <span class="stat-label">Embedding drift</span>
             </div>
           </div>
         </div>
